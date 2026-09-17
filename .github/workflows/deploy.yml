@@ -10,10 +10,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy
+      - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
-          apiToken: APNA_TOKEN_YAHAN
+          apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: 17a69de882a2aa141dcb7c2e8fe22fb1
           projectName: r4x-proximity-voice
           directory: .
