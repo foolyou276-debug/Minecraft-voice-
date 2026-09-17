@@ -1,0 +1,110 @@
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+    if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+    if (url.pathname === '/ws') {
+      if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
+      const room = url.searchParams.get('room') || 'global';
+      const id = env.VOICE_ROOM.idFromName('room:' + room);
+      return env.VOICE_ROOM.get(id).fetch(request);
+    }
+
+    if (url.pathname === '/position' && request.method === 'POST') {
+      const data = await request.json();
+      const room = data.room || 'global';
+      const id = env.VOICE_ROOM.idFromName('room:' + room);
+      return env.VOICE_ROOM.get(id).fetch(new Request('https://internal/position', {
+        method: 'POST', body: JSON.stringify(data),
+        headers: { 'Content-Type': 'application/json' }
+      }));
+    }
+
+    if (url.pathname === '/positions') {
+      const room = url.searchParams.get('room') || 'global';
+      const id = env.VOICE_ROOM.idFromName('room:' + room);
+      const res = await env.VOICE_ROOM.get(id).fetch(new Request('https://internal/positions'));
+      return new Response(await res.text(), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    return new Response('R4X Proximity Voice', { headers: corsHeaders });
+  }
+};
+
+export class VoiceRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.sessions = new Map();
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/position') {
+      const data = await request.json();
+      const { username, x, y, z, world } = data;
+      if (this.sessions.has(username)) {
+        const s = this.sessions.get(username);
+        s.x = x; s.y = y; s.z = z; s.world = world;
+      }
+      this.broadcast({ type: 'positions', players: this.getPositions() });
+      return new Response('ok');
+    }
+
+    if (url.pathname === '/positions') {
+      return new Response(JSON.stringify(this.getPositions()), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const [client, server] = Object.values(new WebSocketPair());
+    this.state.acceptWebSocket(server);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws, message) {
+    const data = JSON.parse(message);
+    if (data.type === 'join') {
+      this.sessions.set(data.username, { ws, x: 0, y: 64, z: 0, world: 'world' });
+      ws._username = data.username;
+      ws.send(JSON.stringify({ type: 'players', players: [...this.sessions.keys()] }));
+      this.broadcast({ type: 'joined', username: data.username });
+    }
+    if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice') {
+      const t = this.sessions.get(data.target);
+      if (t?.ws) t.ws.send(JSON.stringify({ ...data, from: ws._username }));
+    }
+    if (data.type === 'positions') {
+      if (ws._username && this.sessions.has(ws._username)) {
+        const s = this.sessions.get(ws._username);
+        s.x = data.x; s.y = data.y; s.z = data.z; s.world = data.world;
+      }
+      this.broadcast({ type: 'positions', players: this.getPositions() });
+    }
+  }
+
+  async webSocketClose(ws) {
+    if (ws._username) {
+      this.sessions.delete(ws._username);
+      this.broadcast({ type: 'left', username: ws._username });
+    }
+  }
+
+  broadcast(data) {
+    const msg = JSON.stringify(data);
+    for (const [, s] of this.sessions) {
+      try { s.ws?.send(msg); } catch {}
+    }
+  }
+
+  getPositions() {
+    const r = {};
+    for (const [n, s] of this.sessions) r[n] = { x: s.x, y: s.y, z: s.z, world: s.world };
+    return r;
+  }
+}
